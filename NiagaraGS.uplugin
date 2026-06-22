@@ -1,0 +1,24 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "1.0",
+    "FriendlyName": "NiagaraGS",
+    "Description": "Animatable Gaussian Splat renderer via Niagara GPU simulation",
+    "Category": "Rendering",
+    "CreatedBy": "You",
+    "CreatedByURL": "",
+    "DocsURL": "",
+    "MarketplaceURL": "",
+    "SupportURL": "",
+    "CanContainContent": true,
+    "IsBetaVersion": false,
+    "IsExperimentalVersion": true,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "NiagaraGS",
+            "Type": "Runtime",
+            "LoadingPhase": "PostEngineInit"
+        }
+    ]
+}

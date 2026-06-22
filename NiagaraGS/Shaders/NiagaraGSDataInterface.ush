@@ -1,0 +1,6 @@
+// NiagaraGSDataInterface.ush
+// Note: This file has been deprecated and its logic is now generated fully dynamically 
+// inside NiagaraGSDataInterface.cpp to prevent Niagara compiler hangs/freezes!
+//
+// Leaving this file empty or as comments is safe. You can remove or comment out any 
+// static #include "/NiagaraGS/NiagaraGSDataInterface.ush" commands.
