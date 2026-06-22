@@ -30,7 +30,7 @@ bool UGaussianSplatAsset::ReimportFromSource(FString& OutError)
     }
 
     TArray<FGaussianSplatData> NewSplats;
-    if (!FGaussianSplatPLYParser::ParsePLY(SourceFilePath, NewSplats, OutError))
+    if (!FGaussianSplatPLYParser::ParsePLY(SourceFilePath, NewSplats,SHBands, OutError))
     {
         return false;
     }

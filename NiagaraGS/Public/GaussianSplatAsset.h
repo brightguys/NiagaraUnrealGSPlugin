@@ -28,6 +28,11 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gaussian Splats")
     int32 SplatCount = 0;
 
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian Splat|Spherical Harmonics")
+    int32 SHBands = 0;
+
+
     // ── UObject interface ──────────────────────────────────────────
     virtual void PostLoad() override;
 

@@ -7,10 +7,8 @@
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-
 // DC spherical harmonic coefficient → linear RGB
-// This is the standard formula: color = 0.5 + SH_C0 * f_dc
-// where SH_C0 = 0.28209479177387814 (1 / (2 * sqrt(pi)))
+// color = 0.5 + SH_C0 * f_dc   where SH_C0 = 1/(2*sqrt(pi))
 FVector3f FGaussianSplatPLYParser::SHDCToColor(float dc0, float dc1, float dc2)
 {
     const float SH_C0 = 0.28209479177387814f;
@@ -21,21 +19,11 @@ FVector3f FGaussianSplatPLYParser::SHDCToColor(float dc0, float dc1, float dc2)
     );
 }
 
-// PLY coordinate system:  X right, Y up, Z forward (right-handed)
-// UE coordinate system:   X forward, Y right, Z up (left-handed)
-// Mapping:  UE.X = PLY.X * 100   (also meters → centimeters)
-//           UE.Y = -PLY.Z * 100
-//           UE.Z = -PLY.Y * 100   (note: flipped — PLY Y is depth)
-// Wait — actually the Magnopus derivation gives us:
-//   UE position = (PLY.x, -PLY.z, -PLY.y) * 100
-// which is what we use here.
 FVector3f FGaussianSplatPLYParser::ConvertPosition(float x, float y, float z)
 {
     return FVector3f(x * 100.0f, y * 100.0f, z * 100.0f);
 }
 
-// PLY scale is log-scale, needs sigmoid activation, then cm conversion
-// CURRENT — using exp()
 FVector3f FGaussianSplatPLYParser::ConvertScale(float sx, float sy, float sz)
 {
     return FVector3f(
@@ -44,18 +32,19 @@ FVector3f FGaussianSplatPLYParser::ConvertScale(float sx, float sy, float sz)
         100.0f / FMath::Exp(-sz)
     );
 }
-// PLY quaternion is (rot_0=w, rot_1=x, rot_2=y, rot_3=z)
-// UE FQuat4f is (X, Y, Z, W)
-// We also need to apply the same axis flip as position.
-// The correct transform for the PLY→UE axis flip on a quaternion is:
-//   UE.quat = normalize( rot_1, -rot_3, -rot_2, rot_0 )
-// (derived by composing the axis permutation matrix with the quaternion)
+
 FQuat4f FGaussianSplatPLYParser::ConvertOrientation(float w, float x, float y, float z)
 {
     FQuat4f Q(x, y, z, w);
     Q.Normalize();
     return Q;
 }
+
+float FGaussianSplatPLYParser::Sigmoid(float x)
+{
+    return 1.0f / (1.0f + FMath::Exp(-x));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Header parsing
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,9 +64,6 @@ bool FGaussianSplatPLYParser::ParseHeader(
     int32& OutDataStartByte,
     FString& OutError)
 {
-    // PLY headers are always ASCII text ending with "end_header\n"
-    // We scan byte by byte building lines until we hit that sentinel.
-
     int32 Pos = 0;
     const int32 FileSize = FileBytes.Num();
 
@@ -95,7 +81,6 @@ bool FGaussianSplatPLYParser::ParseHeader(
 
     FString Line;
 
-    // First line must be "ply"
     if (!ReadLine(Line) || Line.TrimStartAndEnd() != TEXT("ply"))
     {
         OutError = TEXT("Not a PLY file (missing 'ply' header)");
@@ -112,16 +97,14 @@ bool FGaussianSplatPLYParser::ParseHeader(
 
         if (Line == TEXT("end_header"))
         {
-            OutDataStartByte = Pos;  // byte immediately after "end_header\n"
+            OutDataStartByte = Pos;
             break;
         }
 
         TArray<FString> Tokens;
         Line.ParseIntoArrayWS(Tokens);
-
         if (Tokens.Num() == 0) continue;
 
-        // format ascii 1.0  |  format binary_little_endian 1.0
         if (Tokens[0] == TEXT("format") && Tokens.Num() >= 2)
         {
             bFoundFormat = true;
@@ -136,23 +119,16 @@ bool FGaussianSplatPLYParser::ParseHeader(
             }
             else if (Tokens[1] == TEXT("binary_big_endian"))
             {
-                // We could support this but almost no 3DGS tool produces it
                 OutError = TEXT("Big-endian PLY not supported");
                 return false;
             }
         }
-
-        // element vertex 1234567
         else if (Tokens[0] == TEXT("element") && Tokens.Num() >= 3)
         {
             bInVertexElement = (Tokens[1] == TEXT("vertex"));
             if (bInVertexElement)
-            {
                 OutHeader.VertexCount = FCString::Atoi(*Tokens[2]);
-            }
         }
-
-        // property float x  |  property float scale_0  etc.
         else if (Tokens[0] == TEXT("property") && bInVertexElement && Tokens.Num() >= 3)
         {
             FPLYProperty Prop;
@@ -166,9 +142,8 @@ bool FGaussianSplatPLYParser::ParseHeader(
             }
             else if (TypeStr == TEXT("double") || TypeStr == TEXT("float64"))
             {
-                // Rare but seen in some exporters
                 Prop.ByteSize = 8;
-                Prop.IsFloat = false; // we'll read but discard precision
+                Prop.IsFloat = false;
             }
             else if (TypeStr == TEXT("int") || TypeStr == TEXT("int32") ||
                 TypeStr == TEXT("uint") || TypeStr == TEXT("uint32"))
@@ -178,9 +153,9 @@ bool FGaussianSplatPLYParser::ParseHeader(
             }
             else
             {
-                // Unknown type — record size 0 so we can warn but not crash
                 Prop.ByteSize = 0;
-                UE_LOG(LogTemp, Warning, TEXT("NiagaraGS: Unknown PLY property type '%s' for '%s', skipping"),
+                UE_LOG(LogTemp, Warning,
+                    TEXT("NiagaraGS: Unknown PLY property type '%s' for '%s', skipping"),
                     *TypeStr, *Prop.Name);
             }
 
@@ -195,7 +170,6 @@ bool FGaussianSplatPLYParser::ParseHeader(
         OutError = TEXT("PLY header missing format declaration");
         return false;
     }
-
     if (OutHeader.VertexCount <= 0)
     {
         OutError = TEXT("PLY header has no vertex element or zero vertices");
@@ -203,6 +177,38 @@ bool FGaussianSplatPLYParser::ParseHeader(
     }
 
     OutHeader.ElementStride = CurrentByteOffset;
+
+    // ── Detect SH degree from f_rest_N properties ─────────────────────────
+    // Count how many f_rest_N are present in the header.
+    // PLY convention: all f_rest values are floats named f_rest_0, f_rest_1, ...
+    //
+    // Mapping from count → degree:
+    //   0  coefficients → degree 0 (base color only)
+    //   9  coefficients → degree 1  (3 bases × 3 channels)
+    //   24 coefficients → degree 2  (8 bases × 3 channels)
+    //   45 coefficients → degree 3  (15 bases × 3 channels) ← most common
+    //
+    // Some files may have intermediate counts — we round DOWN to the nearest
+    // complete degree so we never read past available data.
+    {
+        int32 RestCount = 0;
+        for (const FPLYProperty& P : OutHeader.Properties)
+        {
+            if (P.Name.StartsWith(TEXT("f_rest_")))
+                ++RestCount;
+        }
+        OutHeader.SHRestCount = RestCount;
+
+        if (RestCount >= 45) OutHeader.SHDegree = 3;
+        else if (RestCount >= 24) OutHeader.SHDegree = 2;
+        else if (RestCount >= 9)  OutHeader.SHDegree = 1;
+        else                      OutHeader.SHDegree = 0;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("NiagaraGS: PLY SH detection — %d f_rest properties → degree %d"),
+            RestCount, OutHeader.SHDegree);
+    }
+
     return true;
 }
 
@@ -210,9 +216,6 @@ bool FGaussianSplatPLYParser::ParseHeader(
 //  Single splat conversion
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Reads a float from a raw byte pointer at a given offset.
-// We cast directly — this is safe because PLY binary is always tightly packed
-// and our platform is little-endian (x86/ARM).
 static float ReadFloat(const uint8* Data, int32 Offset)
 {
     float Val;
@@ -226,7 +229,6 @@ FGaussianSplatData FGaussianSplatPLYParser::ConvertSplat(
 {
     FGaussianSplatData Out;
 
-    // Helper lambda: read a named property or return a default
     auto Get = [&](const FString& Name, float Default = 0.0f) -> float
         {
             int32 Off = Header.OffsetOf(Name);
@@ -235,32 +237,52 @@ FGaussianSplatData FGaussianSplatPLYParser::ConvertSplat(
         };
 
     // Position
-    float px = Get(TEXT("x"));
-    float py = Get(TEXT("y"));
-    float pz = Get(TEXT("z"));
-    Out.Position = ConvertPosition(px, py, pz);
+    Out.Position = ConvertPosition(Get(TEXT("x")), Get(TEXT("y")), Get(TEXT("z")));
 
     // Scale (log-space in PLY)
-    float sx = Get(TEXT("scale_0"), 0.0f);
-    float sy = Get(TEXT("scale_1"), 0.0f);
-    float sz = Get(TEXT("scale_2"), 0.0f);
-    Out.Scale = ConvertScale(sx, sy, sz);
+    Out.Scale = ConvertScale(
+        Get(TEXT("scale_0")), Get(TEXT("scale_1")), Get(TEXT("scale_2")));
 
-    // Orientation (PLY stores as rot_0=w, rot_1=x, rot_2=y, rot_3=z)
-    float rw = Get(TEXT("rot_0"), 1.0f);
-    float rx = Get(TEXT("rot_1"), 0.0f);
-    float ry = Get(TEXT("rot_2"), 0.0f);
-    float rz = Get(TEXT("rot_3"), 0.0f);
-    Out.Orientation = ConvertOrientation(rw, rx, ry, rz);
+    // Orientation (PLY: rot_0=w, rot_1=x, rot_2=y, rot_3=z)
+    Out.Orientation = ConvertOrientation(
+        Get(TEXT("rot_0"), 1.0f),
+        Get(TEXT("rot_1")), Get(TEXT("rot_2")), Get(TEXT("rot_3")));
 
-    // Opacity (logit-space in PLY, sigmoid to get [0,1])
-    Out.Opacity = Sigmoid(Get(TEXT("opacity"), 0.0f));
+    // Opacity (logit → sigmoid)
+    Out.Opacity = Sigmoid(Get(TEXT("opacity")));
 
-    // Color from zero-order SH DC coefficients
-    float dc0 = Get(TEXT("f_dc_0"), 0.0f);
-    float dc1 = Get(TEXT("f_dc_1"), 0.0f);
-    float dc2 = Get(TEXT("f_dc_2"), 0.0f);
-    Out.Color = SHDCToColor(dc0, dc1, dc2);
+    // Base color from DC SH coefficients
+    Out.Color = SHDCToColor(
+        Get(TEXT("f_dc_0")), Get(TEXT("f_dc_1")), Get(TEXT("f_dc_2")));
+
+    // ── Higher-order SH coefficients ──────────────────────────────────────
+    //
+    // We read exactly the number of f_rest_N coefficients that correspond to
+    // the detected SH degree. The coefficients are stored RAW — no conversion
+    // is applied here because the material HLSL custom node evaluates them
+    // against the camera direction at render time.
+    //
+    // PLY channel order (degree 3 example, 45 floats total):
+    //   f_rest_0  .. f_rest_14   R channel: 15 higher-order coefficients
+    //   f_rest_15 .. f_rest_29   G channel: 15 higher-order coefficients
+    //   f_rest_30 .. f_rest_44   B channel: 15 higher-order coefficients
+    //
+    // This interleaving is NOT changed here. The material HLSL must account
+    // for this layout when sampling the SH buffer.
+    {
+        // Coefficient counts per degree (cumulative, higher-order only):
+        //   deg 1: 3 bases * 3 ch = 9
+        //   deg 2: 8 bases * 3 ch = 24
+        //   deg 3: 15 bases * 3 ch = 45
+        const int32 CoeffsToCopy = Header.SHRestCount;  // actual count in file
+
+        Out.SHCoefficients.SetNumUninitialized(CoeffsToCopy);
+        for (int32 i = 0; i < CoeffsToCopy; ++i)
+        {
+            FString Name = FString::Printf(TEXT("f_rest_%d"), i);
+            Out.SHCoefficients[i] = Get(Name, 0.0f);
+        }
+    }
 
     return Out;
 }
@@ -272,11 +294,9 @@ FGaussianSplatData FGaussianSplatPLYParser::ConvertSplat(
 bool FGaussianSplatPLYParser::ParsePLY(
     const FString& FilePath,
     TArray<FGaussianSplatData>& OutSplats,
+    int32& OutSHDegree,
     FString& OutError)
 {
-    // Load entire file into memory.
-    // For multi-million-splat files this is 200–800 MB — UE's TArray
-    // handles this fine. We'll add streaming in a later step if needed.
     TArray<uint8> FileBytes;
     if (!FFileHelper::LoadFileToArray(FileBytes, *FilePath))
     {
@@ -288,11 +308,9 @@ bool FGaussianSplatPLYParser::ParsePLY(
     int32 DataStart = 0;
 
     if (!ParseHeader(FileBytes, Header, DataStart, OutError))
-    {
         return false;
-    }
 
-    // Validate we have the minimum required properties
+    // Validate required core properties (SH is optional by design)
     const TArray<FString> Required = {
         TEXT("x"), TEXT("y"), TEXT("z"),
         TEXT("rot_0"), TEXT("rot_1"), TEXT("rot_2"), TEXT("rot_3"),
@@ -310,12 +328,12 @@ bool FGaussianSplatPLYParser::ParsePLY(
         }
     }
 
+    OutSHDegree = Header.SHDegree;
     OutSplats.Empty();
     OutSplats.Reserve(Header.VertexCount);
 
     if (Header.bIsBinary)
     {
-        // ── Binary path (fast) ──────────────────────────────────────
         const int32 ExpectedBytes = DataStart + Header.VertexCount * Header.ElementStride;
         if (FileBytes.Num() < ExpectedBytes)
         {
@@ -326,7 +344,6 @@ bool FGaussianSplatPLYParser::ParsePLY(
         }
 
         const uint8* DataPtr = FileBytes.GetData() + DataStart;
-
         for (int32 i = 0; i < Header.VertexCount; ++i)
         {
             OutSplats.Add(ConvertSplat(DataPtr, Header));
@@ -335,14 +352,12 @@ bool FGaussianSplatPLYParser::ParsePLY(
     }
     else
     {
-        // ── ASCII path (slow, but correct for compatibility) ─────────
-        // Re-scan from DataStart, parsing one line per vertex
+        // ASCII path
         int32 Pos = DataStart;
         const int32 FileSize = FileBytes.Num();
 
         for (int32 i = 0; i < Header.VertexCount; ++i)
         {
-            // Read one line
             FString Line;
             while (Pos < FileSize)
             {
@@ -356,12 +371,10 @@ bool FGaussianSplatPLYParser::ParsePLY(
 
             if (Tokens.Num() < Header.Properties.Num())
             {
-                OutError = FString::Printf(
-                    TEXT("ASCII PLY line %d has too few tokens"), i);
+                OutError = FString::Printf(TEXT("ASCII PLY line %d has too few tokens"), i);
                 return false;
             }
 
-            // Build a fake binary block so ConvertSplat works identically
             TArray<uint8> FakeBinary;
             FakeBinary.SetNumZeroed(Header.ElementStride);
 
@@ -379,8 +392,9 @@ bool FGaussianSplatPLYParser::ParsePLY(
         }
     }
 
-    UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Parsed %d splats from %s"),
-        OutSplats.Num(), *FPaths::GetCleanFilename(FilePath));
+    UE_LOG(LogTemp, Log,
+        TEXT("NiagaraGS: Parsed %d splats (SH degree %d) from %s"),
+        OutSplats.Num(), OutSHDegree, *FPaths::GetCleanFilename(FilePath));
 
     return true;
 }

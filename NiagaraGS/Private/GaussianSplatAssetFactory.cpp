@@ -45,8 +45,9 @@ UObject* UGaussianSplatAssetFactory::FactoryCreateFile(
     // Parse the PLY
     TArray<FGaussianSplatData> ParsedSplats;
     FString ParseError;
+    int32 SHBandsPassed = 0;
 
-    if (!FGaussianSplatPLYParser::ParsePLY(Filename, ParsedSplats, ParseError))
+    if (!FGaussianSplatPLYParser::ParsePLY(Filename, ParsedSplats, SHBandsPassed, ParseError))
     {
 
         // Show error in editor notification
@@ -60,6 +61,8 @@ UObject* UGaussianSplatAssetFactory::FactoryCreateFile(
 
     NewAsset->SplatData = MoveTemp(ParsedSplats);
     NewAsset->SourceFilePath = Filename;
+    NewAsset->SHBands = SHBandsPassed;
+
     NewAsset->OnImportFinished();
 
     UE_LOG(LogTemp, Log,
