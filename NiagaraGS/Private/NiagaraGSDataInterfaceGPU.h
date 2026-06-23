@@ -8,14 +8,16 @@
 #include "NiagaraDataInterfaceRW.h"
 #include "GaussianSplatData.h"
 
-// GPU Memory layout. Structured buffers wrapped by RHI Shader Resource Views (SRV)
 BEGIN_SHADER_PARAMETER_STRUCT(FNiagaraGSShaderParameters, )
     SHADER_PARAMETER(int32, SplatCount)
+    SHADER_PARAMETER(int32, SHDegree)           // NEW
     SHADER_PARAMETER_SRV(Buffer<float4>, Positions)
     SHADER_PARAMETER_SRV(Buffer<float4>, Scales)
     SHADER_PARAMETER_SRV(Buffer<float4>, Rotations)
     SHADER_PARAMETER_SRV(Buffer<float4>, ColorOpacity)
+    SHADER_PARAMETER_SRV(Buffer<float4>, SHCoefficients)  // NEW
 END_SHADER_PARAMETER_STRUCT()
+
 
 struct FNiagaraGSSplatBuffer
 {
@@ -37,6 +39,8 @@ struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
     FNiagaraGSSplatBuffer ScalesBuffer;
     FNiagaraGSSplatBuffer RotationsBuffer;
     FNiagaraGSSplatBuffer ColorOpacityBuffer;
+    FNiagaraGSSplatBuffer SHCoefficientsBuffer;  // NEW
+    int32 SHDegree = 0;
 
     // Fallback: a single zeroed float4 element bound when real data isn't ready.
     // Prevents Unreal's shader parameter validation from crashing on null SRV slots.

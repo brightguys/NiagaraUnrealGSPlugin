@@ -42,6 +42,7 @@ public:
     void GetSplatOrientation(FVectorVMExternalFunctionContext& Context);
     void GetSplatColor(FVectorVMExternalFunctionContext& Context);
     void GetSplatOpacity(FVectorVMExternalFunctionContext& Context);
+    void GetSplatSHColor(FVectorVMExternalFunctionContext& Context);
 
     // GPU Interface
     virtual void GetParameterDefinitionHLSL(const FNiagaraDataInterfaceGPUParamInfo& ParamInfo, FString& OutHLSL) override;
@@ -62,4 +63,5 @@ private:
     static const FName Name_GetSplatOrientation;
     static const FName Name_GetSplatColor;
     static const FName Name_GetSplatOpacity;
+    static const FName Name_GetSplatSHColor;
 }; 

@@ -61,7 +61,7 @@ UObject* UGaussianSplatAssetFactory::FactoryCreateFile(
 
     NewAsset->SplatData = MoveTemp(ParsedSplats);
     NewAsset->SourceFilePath = Filename;
-    NewAsset->SHBands = SHBandsPassed;
+    NewAsset->SHDegree = SHBandsPassed;
 
     NewAsset->OnImportFinished();
 

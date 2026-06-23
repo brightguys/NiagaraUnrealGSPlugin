@@ -29,8 +29,8 @@ public:
     int32 SplatCount = 0;
 
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian Splat|Spherical Harmonics")
-    int32 SHBands = 0;
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian Splats")
+    int32 SHDegree = 0;
 
 
     // ── UObject interface ──────────────────────────────────────────

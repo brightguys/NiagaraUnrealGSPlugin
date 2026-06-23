@@ -13,9 +13,9 @@ FVector3f FGaussianSplatPLYParser::SHDCToColor(float dc0, float dc1, float dc2)
 {
     const float SH_C0 = 0.28209479177387814f;
     return FVector3f(
-        FMath::Clamp(0.5f + SH_C0 * dc0, 0.0f, 1.0f),
-        FMath::Clamp(0.5f + SH_C0 * dc1, 0.0f, 1.0f),
-        FMath::Clamp(0.5f + SH_C0 * dc2, 0.0f, 1.0f)
+        0.5f + SH_C0 * dc0,
+        0.5f + SH_C0 * dc1,
+        0.5f + SH_C0 * dc2
     );
 }
 
@@ -195,7 +195,7 @@ bool FGaussianSplatPLYParser::ParseHeader(
         for (const FPLYProperty& P : OutHeader.Properties)
         {
             if (P.Name.StartsWith(TEXT("f_rest_")))
-                ++RestCount;
+                RestCount++;
         }
         OutHeader.SHRestCount = RestCount;
 

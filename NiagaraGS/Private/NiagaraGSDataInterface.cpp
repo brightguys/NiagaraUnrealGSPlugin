@@ -20,6 +20,7 @@ const FName UNiagaraGSDataInterface::Name_GetSplatScale(TEXT("GetSplatScale"));
 const FName UNiagaraGSDataInterface::Name_GetSplatOrientation(TEXT("GetSplatOrientation"));
 const FName UNiagaraGSDataInterface::Name_GetSplatColor(TEXT("GetSplatColor"));
 const FName UNiagaraGSDataInterface::Name_GetSplatOpacity(TEXT("GetSplatOpacity"));
+const FName UNiagaraGSDataInterface::Name_GetSplatSHColor(TEXT("GetSplatSHColor"));
 
 bool UNiagaraGSDataInterface::CopyToInternal(UNiagaraDataInterface* Destination) const
 {
@@ -138,6 +139,22 @@ void UNiagaraGSDataInterface::GetFunctions(TArray<FNiagaraFunctionSignature>& Ou
         Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetFloatDef(), TEXT("Opacity")));
         OutFunctions.Add(Sig);
     }
+
+
+    // Spherical Harmonics
+    {
+        FNiagaraFunctionSignature Sig;
+        Sig.Name = Name_GetSplatSHColor;
+        Sig.bMemberFunction = true;
+        Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;  // GPU only — SH eval is shader math
+        Sig.bSupportsGPU = true;
+        Sig.Inputs.Add(NDISelf());
+        Sig.Inputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
+        Sig.Inputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("ViewDirection")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("Color")));
+        OutFunctions.Add(Sig);
+    }
 }
 
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatCount);
@@ -146,6 +163,7 @@ DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatScale);
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatOrientation);
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatColor);
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatOpacity);
+DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHColor);
 
 void UNiagaraGSDataInterface::GetVMExternalFunction(
     const FVMExternalFunctionBindingInfo& BindingInfo, void* InstanceData, FVMExternalFunction& OutFunc)
@@ -162,6 +180,8 @@ void UNiagaraGSDataInterface::GetVMExternalFunction(
         NDI_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatColor)::Bind(this, OutFunc);
     else if (BindingInfo.Name == Name_GetSplatOpacity)
         NDI_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatOpacity)::Bind(this, OutFunc);
+    else if (BindingInfo.Name == Name_GetSplatSHColor)
+        NDI_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHColor)::Bind(this, OutFunc);
 }
 
 void UNiagaraGSDataInterface::GetSplatCount(FVectorVMExternalFunctionContext& Context)
@@ -276,6 +296,22 @@ void UNiagaraGSDataInterface::GetSplatOpacity(FVectorVMExternalFunctionContext& 
     }
 }
 
+void UNiagaraGSDataInterface::GetSplatSHColor(FVectorVMExternalFunctionContext& Context)
+{
+    // If you do not intend to run this on CPU, you can leave this empty, 
+    // but the VM still expects you to "consume" the input parameters.
+    FNDIInputParam<int32> InIndex(Context);
+    FNDIInputParam<FVector3f> InViewDir(Context);
+    FNDIOutputParam<FVector3f> OutColor(Context);
+
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
+    {
+        InIndex.GetAndAdvance();
+        InViewDir.GetAndAdvance();
+        OutColor.SetAndAdvance(FVector3f(1.0f, 1.0f, 1.0f)); // Default white on CPU
+    }
+}
+
 void UNiagaraGSDataInterface::PostInitProperties()
 {
     Super::PostInitProperties();
@@ -351,6 +387,10 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
     OutHLSL += FString::Printf(TEXT("Buffer<float4> %s_Rotations;\n"), *S);
     OutHLSL += FString::Printf(TEXT("Buffer<float4> %s_ColorOpacity;\n\n"), *S);
 
+    // --- ADD THESE TWO LINES ---
+    OutHLSL += FString::Printf(TEXT("Buffer<float4> %s_SHCoefficients;\n"), *S);
+    OutHLSL += FString::Printf(TEXT("int %s_SHDegree;\n\n"), *S); // Ensure you pass this from SetShaderParameters
+
     // 2. GetSplatCount
     OutHLSL += FString::Printf(TEXT(
         "void %s_GetSplatCount(out int OutCount)\n"
@@ -391,7 +431,7 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
         "}\n\n"),
         *S, *S, *S);
 
-    // GetSplatColor — returns float4 to match Niagara's FLinearColor
+    // 6. GetSplatColor — returns float4 to match Niagara's FLinearColor
     OutHLSL += FString::Printf(TEXT(
         "void %s_GetSplatColor(int Index, out float4 OutColor)\n"
         "{\n"
@@ -409,6 +449,97 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
         "        ? %s_ColorOpacity[Index].w : 0.0;\n"
         "}\n\n"),
         *S, *S, *S);
+
+    // 8. GetSplatSHColor
+    // 6. GetSplatSHColor 
+    OutHLSL += FString::Printf(TEXT(
+        "void %s_GetSplatSHColor(int Index, float3 ViewDir, out float3 OutColor)\n"
+        "{\n"
+        "    if (Index >= 0 && Index < %s_SplatCount)\n"
+        "    {\n"
+        "        float3 Color = %s_ColorOpacity[Index].xyz;\n"
+        "        \n"
+        "        if (%s_SHDegree < 1)\n"
+        "        {\n"
+        "            OutColor = clamp(Color, 0.0, 1.0);\n"
+        "            return;\n"
+        "        }\n"
+        "        \n"
+        "        int Base = Index * 12;\n"
+        "        \n"
+        "        // Unpack all 45 coefficients from the 12 float4s\n"
+        "        float sh[45];\n"
+        "        for (int i = 0; i < 11; i++)\n"
+        "        {\n"
+        "            float4 v = %s_SHCoefficients[Base + i];\n"
+        "            sh[i*4+0] = v.x; sh[i*4+1] = v.y; sh[i*4+2] = v.z; sh[i*4+3] = v.w;\n"
+        "        }\n"
+        "        sh[44] = %s_SHCoefficients[Base + 11].x;\n"
+        "        \n"
+        "        float x = ViewDir.x;\n"
+        "        float y = ViewDir.y;\n"
+        "        float z = ViewDir.z;\n"
+        "        float xx = x * x, yy = y * y, zz = z * z;\n"
+        "        float xy = x * y, yz = y * z, xz = x * z;\n"
+        "        \n"
+        "        // Degree 1\n"
+        "        const float SH_C1 = 0.4886025119029199;\n"
+        "        Color.r += SH_C1 * (-y * sh[0] + z * sh[3] - x * sh[6]);\n"
+        "        Color.g += SH_C1 * (-y * sh[1] + z * sh[4] - x * sh[7]);\n"
+        "        Color.b += SH_C1 * (-y * sh[2] + z * sh[5] - x * sh[8]);\n"
+        "        \n"
+        "        if (%s_SHDegree > 1)\n"
+        "        {\n"
+        "            // Degree 2\n"
+        "            const float SH_C2_0 = 1.0925484305920792;\n"
+        "            const float SH_C2_1 = -1.0925484305920792;\n"
+        "            const float SH_C2_2 = 0.31539156525252005;\n"
+        "            const float SH_C2_3 = -1.0925484305920792;\n"
+        "            const float SH_C2_4 = 0.5462742152960396;\n"
+        "            \n"
+        "            float b2_0 = SH_C2_0 * xy;\n"
+        "            float b2_1 = SH_C2_1 * yz;\n"
+        "            float b2_2 = SH_C2_2 * (2.0 * zz - xx - yy);\n"
+        "            float b2_3 = SH_C2_3 * xz;\n"
+        "            float b2_4 = SH_C2_4 * (xx - yy);\n"
+        "            \n"
+        "            Color.r += b2_0 * sh[9]  + b2_1 * sh[12] + b2_2 * sh[15] + b2_3 * sh[18] + b2_4 * sh[21];\n"
+        "            Color.g += b2_0 * sh[10] + b2_1 * sh[13] + b2_2 * sh[16] + b2_3 * sh[19] + b2_4 * sh[22];\n"
+        "            Color.b += b2_0 * sh[11] + b2_1 * sh[14] + b2_2 * sh[17] + b2_3 * sh[20] + b2_4 * sh[23];\n"
+        "            \n"
+        "            if (%s_SHDegree > 2)\n"
+        "            {\n"
+        "                // Degree 3\n"
+        "                const float SH_C3_0 = -0.5900435899266435;\n"
+        "                const float SH_C3_1 = 2.890611442640554;\n"
+        "                const float SH_C3_2 = -0.4570457994644658;\n"
+        "                const float SH_C3_3 = 0.3731763325901154;\n"
+        "                const float SH_C3_4 = -0.4570457994644658;\n"
+        "                const float SH_C3_5 = 1.445305721320277;\n"
+        "                const float SH_C3_6 = -0.5900435899266435;\n"
+        "                \n"
+        "                float b3_0 = SH_C3_0 * y * (3.0 * xx - yy);\n"
+        "                float b3_1 = SH_C3_1 * xy * z;\n"
+        "                float b3_2 = SH_C3_2 * y * (4.0 * zz - xx - yy);\n"
+        "                float b3_3 = SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);\n"
+        "                float b3_4 = SH_C3_4 * x * (4.0 * zz - xx - yy);\n"
+        "                float b3_5 = SH_C3_5 * z * (xx - yy);\n"
+        "                float b3_6 = SH_C3_6 * x * (xx - 3.0 * yy);\n"
+        "                \n"
+        "                Color.r += b3_0 * sh[24] + b3_1 * sh[27] + b3_2 * sh[30] + b3_3 * sh[33] + b3_4 * sh[36] + b3_5 * sh[39] + b3_6 * sh[42];\n"
+        "                Color.g += b3_0 * sh[25] + b3_1 * sh[28] + b3_2 * sh[31] + b3_3 * sh[34] + b3_4 * sh[37] + b3_5 * sh[40] + b3_6 * sh[43];\n"
+        "                Color.b += b3_0 * sh[26] + b3_1 * sh[29] + b3_2 * sh[32] + b3_3 * sh[35] + b3_4 * sh[38] + b3_5 * sh[41] + b3_6 * sh[44];\n"
+        "            }\n"
+        "        }\n"
+        "        \n"
+        "        OutColor = clamp(Color, 0.0, 1.0);\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        OutColor = float3(1.0, 1.0, 1.0);\n"
+        "    }\n"
+        "}\n\n"),
+        *S, *S, *S, *S, *S, *S, *S, *S);
 }
 
 bool UNiagaraGSDataInterface::GetFunctionHLSL(
@@ -474,6 +605,17 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
             *N, *S);
         return true;
     }
+    if (FunctionInfo.DefinitionName == Name_GetSplatSHColor)
+    {
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(int Index, float3 ViewDir, out float3 OutColor)\n"
+            "{\n"
+            "    %s_GetSplatSHColor(Index, ViewDir, OutColor);\n"
+            "}\n"),
+            *N, *S);
+        return true;
+    }
+
     return false;
 }
 
@@ -511,6 +653,9 @@ void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSet
         Params->Scales = SplatProxy.ScalesBuffer.SRV;
         Params->Rotations = SplatProxy.RotationsBuffer.SRV;
         Params->ColorOpacity = SplatProxy.ColorOpacityBuffer.SRV;
+        Params->SHCoefficients = SplatProxy.SHCoefficientsBuffer.SRV;
+
+        Params->SHDegree = SplatProxy.SHDegree; // You may need to add this property to your proxy
     }
     else
     {
@@ -520,6 +665,8 @@ void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSet
         Params->Scales = Fallback;
         Params->Rotations = Fallback;
         Params->ColorOpacity = Fallback;
+        Params->SHCoefficients = Fallback;
+        //Params->SHDegree = Fallback;
     }
 }
 
@@ -552,6 +699,14 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
 {
     InitFallbackBuffer();
     check(IsInRenderingThread());
+
+    // Pack SH: always allocate 12 float4 slots per splat (48 floats, covers degree 3)
+    // Unused slots = 0.0
+    const int32 SH_FLOATS_PER_SPLAT = 48; // 12 * float4
+    const int32 SH_VEC4S_PER_SPLAT = 12;
+
+    TArray<FVector4f> PackedSH;
+    
     const int32 Count = Splats.Num();
     ReleaseBuffers();
 
@@ -562,15 +717,29 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
     PackedScales.SetNumUninitialized(Count);
     PackedRotations.SetNumUninitialized(Count);
     PackedColorOpacity.SetNumUninitialized(Count);
+    PackedSH.SetNumZeroed(Count * SH_VEC4S_PER_SPLAT);
 
     for (int32 i = 0; i < Count; ++i)
     {
         const FGaussianSplatData& S = Splats[i];
+
+        const int32 BaseIdx = i * SH_VEC4S_PER_SPLAT;
+
         PackedPositions[i] = FVector4f(S.Position.X, S.Position.Y, S.Position.Z, 0.f);
         PackedScales[i] = FVector4f(S.Scale.X, S.Scale.Y, S.Scale.Z, 0.f);
         PackedRotations[i] = FVector4f(S.Orientation.X, S.Orientation.Y, S.Orientation.Z, S.Orientation.W);
         PackedColorOpacity[i] = FVector4f(S.Color.X, S.Color.Y, S.Color.Z, S.Opacity);
+
+        for (int32 f = 0; f < S.SHCoefficients.Num() && f < 45; ++f)
+        {
+            int32 Vec4Idx = BaseIdx + f / 4;
+            int32 CompIdx = f % 4;
+            // FVector4f component access
+            float* Ptr = reinterpret_cast<float*>(&PackedSH[Vec4Idx]);
+            Ptr[CompIdx] = S.SHCoefficients[f];
+        }
     }
+    
 
     auto CreateBuffer = [](
         FRHICommandListImmediate& ImmediateRHICmdList,
@@ -599,6 +768,10 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
     CreateBuffer(ExecutedRHICmdList, ScalesBuffer, PackedScales, TEXT("GS_Scales"));
     CreateBuffer(ExecutedRHICmdList, RotationsBuffer, PackedRotations, TEXT("GS_Rotations"));
     CreateBuffer(ExecutedRHICmdList, ColorOpacityBuffer, PackedColorOpacity, TEXT("GS_ColorOpacity"));
+    CreateBuffer(ExecutedRHICmdList, SHCoefficientsBuffer, PackedSH, TEXT("GS_SHCoefficients"));
+
+
+
 
     SplatCount = Count;
     bBuffersReady = true;
