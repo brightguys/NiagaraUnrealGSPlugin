@@ -349,11 +349,13 @@ void UNiagaraGSDataInterface::UploadToGPU()
 
     UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Queueing GPU upload of %d splats for DI: 0x%p, Proxy: 0x%p"), Count, this, ProxyPtr);
 
+    // NEW — capture SHDegree too
+    int32 CapturedSHDegree = SplatAsset->SHDegree;
     TArray<FGaussianSplatData> SplatsCopy = SplatAsset->SplatData;
     ENQUEUE_RENDER_COMMAND(NiagaraGS_Upload)(
-        [ProxyPtr, SplatsCopy = MoveTemp(SplatsCopy)](FRHICommandListImmediate& RHICmdList) mutable
+        [ProxyPtr, SplatsCopy = MoveTemp(SplatsCopy), CapturedSHDegree](FRHICommandListImmediate& RHICmdList) mutable
         {
-            ProxyPtr->UploadData(SplatsCopy);
+            ProxyPtr->UploadData(SplatsCopy, CapturedSHDegree);
         });
 }
 
@@ -452,6 +454,8 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
 
     // 8. GetSplatSHColor
     // 6. GetSplatSHColor 
+ // 6. GetSplatSHColor 
+    // 6. GetSplatSHColor 
     OutHLSL += FString::Printf(TEXT(
         "void %s_GetSplatSHColor(int Index, float3 ViewDir, out float3 OutColor)\n"
         "{\n"
@@ -461,13 +465,12 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
         "        \n"
         "        if (%s_SHDegree < 1)\n"
         "        {\n"
-        "            OutColor = clamp(Color, 0.0, 1.0);\n"
+        "            OutColor = pow(max(Color, 0.0), 2.2);\n"
         "            return;\n"
         "        }\n"
         "        \n"
         "        int Base = Index * 12;\n"
         "        \n"
-        "        // Unpack all 45 coefficients from the 12 float4s\n"
         "        float sh[45];\n"
         "        for (int i = 0; i < 11; i++)\n"
         "        {\n"
@@ -476,9 +479,16 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
         "        }\n"
         "        sh[44] = %s_SHCoefficients[Base + 11].x;\n"
         "        \n"
-        "        float x = ViewDir.x;\n"
-        "        float y = ViewDir.y;\n"
-        "        float z = ViewDir.z;\n"
+        "        // ---------------------------------------------------------\n"
+        "        // CRITICAL FIX: Normalize the View Direction!\n"
+        "        // Without this, world-space distances are squared/cubed \n"
+        "        // by the SH polynomials, causing values to hit the millions.\n"
+        "        // ---------------------------------------------------------\n"
+        "        float3 Dir = normalize(-ViewDir);\n"
+        "        \n"
+        "        float x = Dir.x;\n"
+        "        float y = Dir.y;\n"
+        "        float z = Dir.z;\n"
         "        float xx = x * x, yy = y * y, zz = z * z;\n"
         "        float xy = x * y, yz = y * z, xz = x * z;\n"
         "        \n"
@@ -532,7 +542,8 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
         "            }\n"
         "        }\n"
         "        \n"
-        "        OutColor = clamp(Color, 0.0, 1.0);\n"
+        "        // Max is standard practice here before clamping so negative light doesn't break blending\n"
+        "        OutColor = pow(max(Color, 0.0), 2.2);\n"
         "    }\n"
         "    else\n"
         "    {\n"
@@ -635,7 +646,7 @@ void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSet
     {
         UE_LOG(LogTemp, Warning, TEXT("NiagaraGS: SetShaderParameters detected uninitialized proxy. Triggering on-demand rendering-thread upload of %d splats for DI: 0x%p, Proxy: 0x%p"),
             SplatAsset->SplatData.Num(), this, &SplatProxy);
-        SplatProxy.UploadData(SplatAsset->SplatData);
+        SplatProxy.UploadData(SplatAsset->SplatData, SplatAsset->SHDegree);
     }
 
     // URGENT CRASH FIX: Guarantee the fallback buffer is initialized on the render thread 
@@ -695,7 +706,7 @@ void FNDIGaussianSplatProxy::InitFallbackBuffer()
     FallbackBuffer.SRV = RHICmdList.CreateShaderResourceView(ViewInit);
 }
 
-void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats)
+void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats, const int32 InSHDegree)
 {
     InitFallbackBuffer();
     check(IsInRenderingThread());
@@ -730,13 +741,39 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
         PackedRotations[i] = FVector4f(S.Orientation.X, S.Orientation.Y, S.Orientation.Z, S.Orientation.W);
         PackedColorOpacity[i] = FVector4f(S.Color.X, S.Color.Y, S.Color.Z, S.Opacity);
 
-        for (int32 f = 0; f < S.SHCoefficients.Num() && f < 45; ++f)
+        // PLY stores: [R_b0..R_b14, G_b0..G_b14, B_b0..B_b14]
+        // HLSL expects: [R_b0, G_b0, B_b0, R_b1, G_b1, B_b1, ...]  (interleaved)
+        //
+        // NumBases = total coefs / 3 channels  (e.g. 45/3 = 15 for degree 3)
+        const int32 NumCoefs = FMath::Min(S.SHCoefficients.Num(), 45);
+        const int32 NumBases = NumCoefs / 3;   // 3=deg1, 8=deg2, 15=deg3
+
+        for (int32 b = 0; b < NumBases; ++b)
         {
-            int32 Vec4Idx = BaseIdx + f / 4;
-            int32 CompIdx = f % 4;
-            // FVector4f component access
+            // PLY channel-major offsets:
+            float r = S.SHCoefficients[b];              // R block: offset b
+            float g = S.SHCoefficients[NumBases + b];   // G block: offset NumBases+b
+            float bv = S.SHCoefficients[2 * NumBases + b]; // B block: offset 2*NumBases+b
+
+            // Interleaved destination: basis b → 3 consecutive floats (R,G,B)
+            int32 DestFloat = b * 3;   // flat float index in the 45-float region
+            int32 Vec4Idx = BaseIdx + DestFloat / 4;
+            int32 CompIdx = DestFloat % 4;
+
             float* Ptr = reinterpret_cast<float*>(&PackedSH[Vec4Idx]);
-            Ptr[CompIdx] = S.SHCoefficients[f];
+            Ptr[CompIdx] = r;
+
+            DestFloat++;
+            Vec4Idx = BaseIdx + DestFloat / 4;
+            CompIdx = DestFloat % 4;
+            Ptr = reinterpret_cast<float*>(&PackedSH[Vec4Idx]);
+            Ptr[CompIdx] = g;
+
+            DestFloat++;
+            Vec4Idx = BaseIdx + DestFloat / 4;
+            CompIdx = DestFloat % 4;
+            Ptr = reinterpret_cast<float*>(&PackedSH[Vec4Idx]);
+            Ptr[CompIdx] = bv;
         }
     }
     
@@ -772,7 +809,7 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
 
 
 
-
+    SHDegree = InSHDegree;
     SplatCount = Count;
     bBuffersReady = true;
 

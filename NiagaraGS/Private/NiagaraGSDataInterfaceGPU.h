@@ -49,7 +49,7 @@ struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
     int32 SplatCount = 0;
     bool bBuffersReady = false;
 
-    void UploadData(const TArray<FGaussianSplatData>& Splats);
+    void UploadData(const TArray<FGaussianSplatData>& Splats, int32 InSHDegree);
     void InitFallbackBuffer();
 
     virtual int32 PerInstanceDataPassedToRenderThreadSize() const override { return 0; }
