@@ -10,18 +10,18 @@
 
 BEGIN_SHADER_PARAMETER_STRUCT(FNiagaraGSShaderParameters, )
     SHADER_PARAMETER(int32, SplatCount)
-    SHADER_PARAMETER(int32, SHDegree)           // NEW
+    SHADER_PARAMETER(int32, SHDegree)
     SHADER_PARAMETER_SRV(Buffer<float4>, Positions)
     SHADER_PARAMETER_SRV(Buffer<float4>, Scales)
     SHADER_PARAMETER_SRV(Buffer<float4>, Rotations)
     SHADER_PARAMETER_SRV(Buffer<float4>, ColorOpacity)
-    SHADER_PARAMETER_SRV(Buffer<float4>, SHCoefficients)  // NEW
+    SHADER_PARAMETER_SRV(Buffer<float4>, SHCoefficients)
 END_SHADER_PARAMETER_STRUCT()
 
 
 struct FNiagaraGSSplatBuffer
 {
-    FBufferRHIRef      Buffer;
+    FBufferRHIRef             Buffer;
     FShaderResourceViewRHIRef SRV;
 
     bool IsValid() const { return Buffer.IsValid(); }
@@ -39,18 +39,24 @@ struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
     FNiagaraGSSplatBuffer ScalesBuffer;
     FNiagaraGSSplatBuffer RotationsBuffer;
     FNiagaraGSSplatBuffer ColorOpacityBuffer;
-    FNiagaraGSSplatBuffer SHCoefficientsBuffer;  // NEW
+    FNiagaraGSSplatBuffer SHCoefficientsBuffer;
     int32 SHDegree = 0;
-
-    // Fallback: a single zeroed float4 element bound when real data isn't ready.
-    // Prevents Unreal's shader parameter validation from crashing on null SRV slots.
-    FNiagaraGSSplatBuffer FallbackBuffer;
-
     int32 SplatCount = 0;
-    bool bBuffersReady = false;
+    bool  bBuffersReady = false;
+    bool bManuallyFlushed = false;
+
+    // ── Fallback buffer ───────────────────────────────────────────────────────
+    // A single zeroed float4 bound when real data isn't ready or has been
+    // flushed. Prevents Unreal's shader parameter validation from crashing on
+    // null SRV slots.
+    FNiagaraGSSplatBuffer FallbackBuffer;
 
     void UploadData(const TArray<FGaussianSplatData>& Splats, int32 InSHDegree);
     void InitFallbackBuffer();
+
+    // Release all splat data buffers but keep the fallback alive so the shader
+    // pipeline never sees a null SRV.  Safe to call from the render thread only.
+    void FlushSplatBuffers();
 
     virtual int32 PerInstanceDataPassedToRenderThreadSize() const override { return 0; }
 
@@ -60,32 +66,34 @@ struct FNDIGaussianSplatProxy : public FNiagaraDataInterfaceProxyRW
         ScalesBuffer.Release();
         RotationsBuffer.Release();
         ColorOpacityBuffer.Release();
+        SHCoefficientsBuffer.Release();
         bBuffersReady = false;
         SplatCount = 0;
     }
 
-    // CRITICAL THREAD SAFETY FIX:
-    // This destructor can execute on the GC sweep channel (Game Thread).
-    // Direct RHI releases of buffer/SRV handles on the Game Thread trigger instant graphics engine driver assertions!
-    // We safely package and command-enqueue the releases onto the Render Thread.
+    // CRITICAL THREAD SAFETY:
+    // The destructor can run on the GC sweep (game thread). Direct RHI releases
+    // there trigger driver assertions. We enqueue onto the render thread instead.
     virtual ~FNDIGaussianSplatProxy()
     {
         FNiagaraGSSplatBuffer TempPositions = PositionsBuffer;
         FNiagaraGSSplatBuffer TempScales = ScalesBuffer;
         FNiagaraGSSplatBuffer TempRotations = RotationsBuffer;
         FNiagaraGSSplatBuffer TempColorOpacity = ColorOpacityBuffer;
+        FNiagaraGSSplatBuffer TempSH = SHCoefficientsBuffer;
         FNiagaraGSSplatBuffer TempFallback = FallbackBuffer;
 
         ENQUEUE_RENDER_COMMAND(NiagaraGS_ProxyReleaseRHI)(
-            [TempPositions, TempScales, TempRotations, TempColorOpacity, TempFallback](FRHICommandListImmediate& RHICmdList) mutable
+            [TempPositions, TempScales, TempRotations,
+            TempColorOpacity, TempSH, TempFallback]
+            (FRHICommandListImmediate& RHICmdList) mutable
             {
-                // Execute SafeRelease safely under the correct thread!
                 TempPositions.Release();
                 TempScales.Release();
                 TempRotations.Release();
                 TempColorOpacity.Release();
+                TempSH.Release();
                 TempFallback.Release();
-            }
-            );
+            });
     }
 };

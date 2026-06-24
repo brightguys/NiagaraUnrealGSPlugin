@@ -797,6 +797,14 @@ void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSet
 {
     FNDIGaussianSplatProxy& SplatProxy = Context.GetProxy<FNDIGaussianSplatProxy>();
 
+    // MODIFIED CHECK: Added "!SplatProxy.bManuallyFlushed"
+    if (!SplatProxy.bBuffersReady && !SplatProxy.bManuallyFlushed && SplatAsset && SplatAsset->SplatData.Num() > 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("NiagaraGS: SetShaderParameters detected uninitialized proxy. Triggering on-demand rendering-thread upload of %d splats for DI: 0x%p, Proxy: 0x%p"),
+            SplatAsset->SplatData.Num(), this, &SplatProxy);
+        SplatProxy.UploadData(SplatAsset->SplatData, SplatAsset->SHDegree);
+    }
+
     // Safeguard / On-demand render thread upload if buffers are not ready but we have CPU data.
     // This is the thread-safest and most bulletproof way because SetShaderParameters is called on the render thread
     // right before binding, and our upload is guaranteed to target the exact proxy being rendered!
@@ -970,7 +978,37 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
     SHDegree = InSHDegree;
     SplatCount = Count;
     bBuffersReady = true;
+    bManuallyFlushed = false; // <--- ADD THIS LINE
 
     UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Uploaded %d splats (%d MB)"),
         Count, (Count * (int32)sizeof(FVector4f) * 4) / (1024 * 1024));
+}
+
+
+void UNiagaraGSDataInterface::FlushGPUBuffers(bool bAlsoClearCPUMemory)
+{
+    FNDIGaussianSplatProxy* ProxyPtr = GetProxyAs<FNDIGaussianSplatProxy>();
+    if (ProxyPtr)
+    {
+        // Enqueue the release on the Render Thread safely
+        ENQUEUE_RENDER_COMMAND(NiagaraGS_FlushBuffers)(
+            [ProxyPtr](FRHICommandListImmediate& RHICmdList)
+            {
+                ProxyPtr->ReleaseBuffers();
+                ProxyPtr->bManuallyFlushed = true; // Mark as flushed to prevent auto re-upload
+                ProxyPtr->InitFallbackBuffer();    // Bind fallback zero-buffer to prevent HLSL crashes
+            });
+    }
+
+    // Optionally clear the heavy CPU array too 
+    if (bAlsoClearCPUMemory && SplatAsset)
+    {
+        SplatAsset->SplatData.Empty();
+        SplatAsset->SplatCount = 0;
+        UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Flushed GPU buffers AND cleared CPU memory."));
+    }
+    else
+    {
+        UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Flushed GPU buffers for memory optimization."));
+    }
 }

@@ -23,6 +23,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian Splats")
     TObjectPtr<UGaussianSplatAsset> SplatAsset;
 
+    // NEW: Manually flush buffers to save memory after particles have initialized
+    UFUNCTION(BlueprintCallable, Category = "Gaussian Splats")
+    void FlushGPUBuffers(bool bAlsoClearCPUMemory = false);
+
     // ── UNiagaraDataInterface interface ───────────────────────────
     virtual void GetFunctions(TArray<FNiagaraFunctionSignature>& OutFunctions) override;
     virtual void GetVMExternalFunction(const FVMExternalFunctionBindingInfo& BindingInfo, void* InstanceData, FVMExternalFunction& OutFunc) override;
