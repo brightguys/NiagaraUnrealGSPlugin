@@ -21,6 +21,7 @@ const FName UNiagaraGSDataInterface::Name_GetSplatOrientation(TEXT("GetSplatOrie
 const FName UNiagaraGSDataInterface::Name_GetSplatColor(TEXT("GetSplatColor"));
 const FName UNiagaraGSDataInterface::Name_GetSplatOpacity(TEXT("GetSplatOpacity"));
 const FName UNiagaraGSDataInterface::Name_GetSplatSHColor(TEXT("GetSplatSHColor"));
+const FName UNiagaraGSDataInterface::Name_GetSplatSHCoefficients(TEXT("GetSplatSHCoefficients"));
 
 bool UNiagaraGSDataInterface::CopyToInternal(UNiagaraDataInterface* Destination) const
 {
@@ -155,6 +156,47 @@ void UNiagaraGSDataInterface::GetFunctions(TArray<FNiagaraFunctionSignature>& Ou
         Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("Color")));
         OutFunctions.Add(Sig);
     }
+
+    // Spherical Harmonics Raw Coefficients (pass-through, no math, split by degree)
+    {
+        FNiagaraFunctionSignature Sig;
+        Sig.Name = Name_GetSplatSHCoefficients;
+        Sig.bMemberFunction = true;
+        Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = true;
+        Sig.Inputs.Add(NDISelf());
+        Sig.Inputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetIntDef(), TEXT("Index")));
+
+        // Output 1: Degree 1 coefficients — 9 floats packed as 3 float3s (R,G,B per basis)
+        // Output 2: Degree 2 coefficients — 15 floats packed as 5 float3s
+        // Output 3: Degree 3 coefficients — 21 floats packed as 7 float3s
+        // We use float3 vectors because Niagara has no float9/15/21 type.
+        // Each float3 = one basis across R,G,B channels.
+
+        // Degree 1: 3 bases * RGB = 9 floats → 3x float3
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D1_Basis0")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D1_Basis1")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D1_Basis2")));
+
+        // Degree 2: 5 bases * RGB = 15 floats → 5x float3
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D2_Basis0")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D2_Basis1")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D2_Basis2")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D2_Basis3")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D2_Basis4")));
+
+        // Degree 3: 7 bases * RGB = 21 floats → 7x float3
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D3_Basis0")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D3_Basis1")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D3_Basis2")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D3_Basis3")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D3_Basis4")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D3_Basis5")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetVec3Def(), TEXT("SH_D3_Basis6")));
+
+        OutFunctions.Add(Sig);
+    }
 }
 
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatCount);
@@ -164,6 +206,8 @@ DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatOrientation);
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatColor);
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatOpacity);
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHColor);
+
+DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHCoefficients);
 
 void UNiagaraGSDataInterface::GetVMExternalFunction(
     const FVMExternalFunctionBindingInfo& BindingInfo, void* InstanceData, FVMExternalFunction& OutFunc)
@@ -182,6 +226,8 @@ void UNiagaraGSDataInterface::GetVMExternalFunction(
         NDI_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatOpacity)::Bind(this, OutFunc);
     else if (BindingInfo.Name == Name_GetSplatSHColor)
         NDI_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHColor)::Bind(this, OutFunc);
+    else if (BindingInfo.Name == Name_GetSplatSHCoefficients)
+        NDI_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHCoefficients)::Bind(this, OutFunc);
 }
 
 void UNiagaraGSDataInterface::GetSplatCount(FVectorVMExternalFunctionContext& Context)
@@ -309,6 +355,33 @@ void UNiagaraGSDataInterface::GetSplatSHColor(FVectorVMExternalFunctionContext& 
         InIndex.GetAndAdvance();
         InViewDir.GetAndAdvance();
         OutColor.SetAndAdvance(FVector3f(1.0f, 1.0f, 1.0f)); // Default white on CPU
+    }
+}
+
+void UNiagaraGSDataInterface::GetSplatSHCoefficients(FVectorVMExternalFunctionContext& Context)
+{
+    // CPU stub — consumes inputs, returns zeros.
+    // SH passthrough is GPU-only; no CPU eval needed.
+    FNDIInputParam<int32> InIndex(Context);
+
+    // 15 float3 outputs (D1:3, D2:5, D3:7)
+    FNDIOutputParam<FVector3f> OutD1_B0(Context); FNDIOutputParam<FVector3f> OutD1_B1(Context); FNDIOutputParam<FVector3f> OutD1_B2(Context);
+    FNDIOutputParam<FVector3f> OutD2_B0(Context); FNDIOutputParam<FVector3f> OutD2_B1(Context); FNDIOutputParam<FVector3f> OutD2_B2(Context);
+    FNDIOutputParam<FVector3f> OutD2_B3(Context); FNDIOutputParam<FVector3f> OutD2_B4(Context);
+    FNDIOutputParam<FVector3f> OutD3_B0(Context); FNDIOutputParam<FVector3f> OutD3_B1(Context); FNDIOutputParam<FVector3f> OutD3_B2(Context);
+    FNDIOutputParam<FVector3f> OutD3_B3(Context); FNDIOutputParam<FVector3f> OutD3_B4(Context); FNDIOutputParam<FVector3f> OutD3_B5(Context);
+    FNDIOutputParam<FVector3f> OutD3_B6(Context);
+
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
+    {
+        InIndex.GetAndAdvance();
+        // All zero on CPU — GPU does real work
+        OutD1_B0.SetAndAdvance(FVector3f::ZeroVector); OutD1_B1.SetAndAdvance(FVector3f::ZeroVector); OutD1_B2.SetAndAdvance(FVector3f::ZeroVector);
+        OutD2_B0.SetAndAdvance(FVector3f::ZeroVector); OutD2_B1.SetAndAdvance(FVector3f::ZeroVector); OutD2_B2.SetAndAdvance(FVector3f::ZeroVector);
+        OutD2_B3.SetAndAdvance(FVector3f::ZeroVector); OutD2_B4.SetAndAdvance(FVector3f::ZeroVector);
+        OutD3_B0.SetAndAdvance(FVector3f::ZeroVector); OutD3_B1.SetAndAdvance(FVector3f::ZeroVector); OutD3_B2.SetAndAdvance(FVector3f::ZeroVector);
+        OutD3_B3.SetAndAdvance(FVector3f::ZeroVector); OutD3_B4.SetAndAdvance(FVector3f::ZeroVector); OutD3_B5.SetAndAdvance(FVector3f::ZeroVector);
+        OutD3_B6.SetAndAdvance(FVector3f::ZeroVector);
     }
 }
 
@@ -453,9 +526,6 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
         *S, *S, *S);
 
     // 8. GetSplatSHColor
-    // 6. GetSplatSHColor 
- // 6. GetSplatSHColor 
-    // 6. GetSplatSHColor 
     OutHLSL += FString::Printf(TEXT(
         "void %s_GetSplatSHColor(int Index, float3 ViewDir, out float3 OutColor)\n"
         "{\n"
@@ -551,6 +621,72 @@ void UNiagaraGSDataInterface::GetParameterDefinitionHLSL(
         "    }\n"
         "}\n\n"),
         *S, *S, *S, *S, *S, *S, *S, *S);
+
+    // 9. GetSplatSHCoefficients — raw passthrough, no math, split by degree
+    // Memory layout in PackedSH buffer (interleaved by UploadData):
+    //   Per splat: 12 float4s (48 floats). First 45 used, last 3 are pad zeros.
+    //   flat[0..8]   = D1: basis0_R, basis0_G, basis0_B, basis1_R ... basis2_B
+    //   flat[9..23]  = D2: basis0_R ... basis4_B
+    //   flat[24..44] = D3: basis0_R ... basis6_B
+    OutHLSL += FString::Printf(TEXT(
+        "void %s_GetSplatSHCoefficients(\n"
+        "    int Index,\n"
+        "    out float3 OutD1_B0, out float3 OutD1_B1, out float3 OutD1_B2,\n"
+        "    out float3 OutD2_B0, out float3 OutD2_B1, out float3 OutD2_B2, out float3 OutD2_B3, out float3 OutD2_B4,\n"
+        "    out float3 OutD3_B0, out float3 OutD3_B1, out float3 OutD3_B2, out float3 OutD3_B3,\n"
+        "    out float3 OutD3_B4, out float3 OutD3_B5, out float3 OutD3_B6)\n"
+        "{\n"
+        "    // Zero everything first — safe fallback if index bad or degree < max\n"
+        "    OutD1_B0 = OutD1_B1 = OutD1_B2 = float3(0,0,0);\n"
+        "    OutD2_B0 = OutD2_B1 = OutD2_B2 = OutD2_B3 = OutD2_B4 = float3(0,0,0);\n"
+        "    OutD3_B0 = OutD3_B1 = OutD3_B2 = OutD3_B3 = OutD3_B4 = OutD3_B5 = OutD3_B6 = float3(0,0,0);\n"
+        "\n"
+        "    if (Index < 0 || Index >= %s_SplatCount) return;\n"
+        "\n"
+        "    // Each splat occupies 12 consecutive float4s in the SH buffer.\n"
+        "    // Unpack all 48 floats into a flat array for easy indexed access.\n"
+        "    int Base = Index * 12;\n"
+        "    float sh[48];\n"
+        "    [unroll]\n"
+        "    for (int i = 0; i < 12; i++)\n"
+        "    {\n"
+        "        float4 v = %s_SHCoefficients[Base + i];\n"
+        "        sh[i*4+0] = v.x; sh[i*4+1] = v.y; sh[i*4+2] = v.z; sh[i*4+3] = v.w;\n"
+        "    }\n"
+        "\n"
+        "    // ── Degree 1 (flat indices 0-8, 3 bases * RGB) ───────────────\n"
+        "    // UploadData interleaves as: R0,G0,B0, R1,G1,B1, R2,G2,B2\n"
+        "    if (%s_SHDegree >= 1)\n"
+        "    {\n"
+        "        OutD1_B0 = float3(sh[0], sh[1], sh[2]);\n"
+        "        OutD1_B1 = float3(sh[3], sh[4], sh[5]);\n"
+        "        OutD1_B2 = float3(sh[6], sh[7], sh[8]);\n"
+        "    }\n"
+        "\n"
+        "    // ── Degree 2 (flat indices 9-23, 5 bases * RGB) ──────────────\n"
+        "    if (%s_SHDegree >= 2)\n"
+        "    {\n"
+        "        OutD2_B0 = float3(sh[9],  sh[10], sh[11]);\n"
+        "        OutD2_B1 = float3(sh[12], sh[13], sh[14]);\n"
+        "        OutD2_B2 = float3(sh[15], sh[16], sh[17]);\n"
+        "        OutD2_B3 = float3(sh[18], sh[19], sh[20]);\n"
+        "        OutD2_B4 = float3(sh[21], sh[22], sh[23]);\n"
+        "    }\n"
+        "\n"
+        "    // ── Degree 3 (flat indices 24-44, 7 bases * RGB) ─────────────\n"
+        "    if (%s_SHDegree >= 3)\n"
+        "    {\n"
+        "        OutD3_B0 = float3(sh[24], sh[25], sh[26]);\n"
+        "        OutD3_B1 = float3(sh[27], sh[28], sh[29]);\n"
+        "        OutD3_B2 = float3(sh[30], sh[31], sh[32]);\n"
+        "        OutD3_B3 = float3(sh[33], sh[34], sh[35]);\n"
+        "        OutD3_B4 = float3(sh[36], sh[37], sh[38]);\n"
+        "        OutD3_B5 = float3(sh[39], sh[40], sh[41]);\n"
+        "        OutD3_B6 = float3(sh[42], sh[43], sh[44]);\n"
+        "        // sh[45..47] are pad zeros — not output\n"
+        "    }\n"
+        "}\n\n"),
+        *S, *S, *S, *S, *S, *S);
 }
 
 bool UNiagaraGSDataInterface::GetFunctionHLSL(
@@ -622,6 +758,28 @@ bool UNiagaraGSDataInterface::GetFunctionHLSL(
             "void %s(int Index, float3 ViewDir, out float3 OutColor)\n"
             "{\n"
             "    %s_GetSplatSHColor(Index, ViewDir, OutColor);\n"
+            "}\n"),
+            *N, *S);
+        return true;
+    }
+    if (FunctionInfo.DefinitionName == Name_GetSplatSHCoefficients)
+    {
+        OutHLSL += FString::Printf(TEXT(
+            "void %s(\n"
+            "    int Index,\n"
+            "    out float3 OutD1_B0, out float3 OutD1_B1, out float3 OutD1_B2,\n"
+            "    out float3 OutD2_B0, out float3 OutD2_B1, out float3 OutD2_B2,\n"
+            "    out float3 OutD2_B3, out float3 OutD2_B4,\n"
+            "    out float3 OutD3_B0, out float3 OutD3_B1, out float3 OutD3_B2,\n"
+            "    out float3 OutD3_B3, out float3 OutD3_B4, out float3 OutD3_B5,\n"
+            "    out float3 OutD3_B6)\n"
+            "{\n"
+            "    %s_GetSplatSHCoefficients(\n"
+            "        Index,\n"
+            "        OutD1_B0, OutD1_B1, OutD1_B2,\n"
+            "        OutD2_B0, OutD2_B1, OutD2_B2, OutD2_B3, OutD2_B4,\n"
+            "        OutD3_B0, OutD3_B1, OutD3_B2, OutD3_B3,\n"
+            "        OutD3_B4, OutD3_B5, OutD3_B6);\n"
             "}\n"),
             *N, *S);
         return true;
