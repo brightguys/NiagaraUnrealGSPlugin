@@ -24,8 +24,8 @@ public:
     TObjectPtr<UGaussianSplatAsset> SplatAsset;
 
     // NEW: Manually flush buffers to save memory after particles have initialized
-    UFUNCTION(BlueprintCallable, Category = "Gaussian Splats")
-    void FlushGPUBuffers(bool bAlsoClearCPUMemory = false);
+    //UFUNCTION(BlueprintCallable, Category = "Gaussian Splats")
+   // void FlushGPUBuffers(bool bAlsoClearCPUMemory = false);
 
     // ── UNiagaraDataInterface interface ───────────────────────────
     virtual void GetFunctions(TArray<FNiagaraFunctionSignature>& OutFunctions) override;
@@ -50,6 +50,8 @@ public:
 
     void GetSplatSHCoefficients(FVectorVMExternalFunctionContext& Context);
 
+    void FlushGPUBuffersVM(FVectorVMExternalFunctionContext& Context);
+
 
     // GPU Interface
     virtual void GetParameterDefinitionHLSL(const FNiagaraDataInterfaceGPUParamInfo& ParamInfo, FString& OutHLSL) override;
@@ -72,5 +74,7 @@ private:
     static const FName Name_GetSplatOpacity;
     static const FName Name_GetSplatSHColor;
     static const FName Name_GetSplatSHCoefficients;
+
+    static const FName Name_FlushGPUBuffers;
 
 }; 

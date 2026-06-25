@@ -23,6 +23,9 @@ const FName UNiagaraGSDataInterface::Name_GetSplatOpacity(TEXT("GetSplatOpacity"
 const FName UNiagaraGSDataInterface::Name_GetSplatSHColor(TEXT("GetSplatSHColor"));
 const FName UNiagaraGSDataInterface::Name_GetSplatSHCoefficients(TEXT("GetSplatSHCoefficients"));
 
+// Near the top with the other names
+const FName UNiagaraGSDataInterface::Name_FlushGPUBuffers(TEXT("FlushGPUBuffers"));
+
 bool UNiagaraGSDataInterface::CopyToInternal(UNiagaraDataInterface* Destination) const
 {
     if (!Super::CopyToInternal(Destination)) return false;
@@ -32,7 +35,7 @@ bool UNiagaraGSDataInterface::CopyToInternal(UNiagaraDataInterface* Destination)
     UE_LOG(LogTemp, Log, TEXT("NiagaraGS: CopyToInternal called. Source DI: 0x%p, Dest DI: 0x%p, Asset: %s"),
         this, Dest, SplatAsset ? *SplatAsset->GetName() : TEXT("None"));
 
-    Dest->UploadToGPU();
+    //Dest->UploadToGPU();
     return true;
 }
 
@@ -197,6 +200,20 @@ void UNiagaraGSDataInterface::GetFunctions(TArray<FNiagaraFunctionSignature>& Ou
 
         OutFunctions.Add(Sig);
     }
+
+    // Inside GetFunctions(TArray<FNiagaraFunctionSignature>& OutFunctions)
+    {
+        FNiagaraFunctionSignature Sig;
+        Sig.Name = Name_FlushGPUBuffers;
+        Sig.bMemberFunction = true;
+        Sig.bRequiresContext = false;
+        Sig.bSupportsCPU = true;
+        Sig.bSupportsGPU = false; // CPU only (System/Emitter scripts)
+        Sig.Inputs.Add(NDISelf());
+        Sig.Inputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetBoolDef(), TEXT("Flush")));
+        Sig.Outputs.Add(FNiagaraVariable(FNiagaraTypeDefinition::GetBoolDef(), TEXT("Success")));
+        OutFunctions.Add(Sig);
+    }
 }
 
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatCount);
@@ -208,6 +225,9 @@ DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatOpacity);
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHColor);
 
 DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHCoefficients);
+
+// Add to your DEFINE_NDI_DIRECT_FUNC_BINDER list
+DEFINE_NDI_DIRECT_FUNC_BINDER(UNiagaraGSDataInterface, FlushGPUBuffersVM);
 
 void UNiagaraGSDataInterface::GetVMExternalFunction(
     const FVMExternalFunctionBindingInfo& BindingInfo, void* InstanceData, FVMExternalFunction& OutFunc)
@@ -228,6 +248,9 @@ void UNiagaraGSDataInterface::GetVMExternalFunction(
         NDI_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHColor)::Bind(this, OutFunc);
     else if (BindingInfo.Name == Name_GetSplatSHCoefficients)
         NDI_FUNC_BINDER(UNiagaraGSDataInterface, GetSplatSHCoefficients)::Bind(this, OutFunc);
+    // Inside GetVMExternalFunction(...)
+    else if (BindingInfo.Name == Name_FlushGPUBuffers)
+        NDI_FUNC_BINDER(UNiagaraGSDataInterface, FlushGPUBuffersVM)::Bind(this, OutFunc);
 }
 
 void UNiagaraGSDataInterface::GetSplatCount(FVectorVMExternalFunctionContext& Context)
@@ -805,16 +828,6 @@ void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSet
         SplatProxy.UploadData(SplatAsset->SplatData, SplatAsset->SHDegree);
     }
 
-    // Safeguard / On-demand render thread upload if buffers are not ready but we have CPU data.
-    // This is the thread-safest and most bulletproof way because SetShaderParameters is called on the render thread
-    // right before binding, and our upload is guaranteed to target the exact proxy being rendered!
-    if (!SplatProxy.bBuffersReady && SplatAsset && SplatAsset->SplatData.Num() > 0)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("NiagaraGS: SetShaderParameters detected uninitialized proxy. Triggering on-demand rendering-thread upload of %d splats for DI: 0x%p, Proxy: 0x%p"),
-            SplatAsset->SplatData.Num(), this, &SplatProxy);
-        SplatProxy.UploadData(SplatAsset->SplatData, SplatAsset->SHDegree);
-    }
-
     // URGENT CRASH FIX: Guarantee the fallback buffer is initialized on the render thread 
     // before any parameters are retrieved/bound. This prevents null SRV bindings and editor crashes.
     SplatProxy.InitFallbackBuffer();
@@ -843,7 +856,7 @@ void UNiagaraGSDataInterface::SetShaderParameters(const FNiagaraDataInterfaceSet
         Params->Rotations = Fallback;
         Params->ColorOpacity = Fallback;
         Params->SHCoefficients = Fallback;
-        //Params->SHDegree = Fallback;
+        Params->SHDegree = 0;
     }
 }
 
@@ -985,30 +998,86 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
 }
 
 
-void UNiagaraGSDataInterface::FlushGPUBuffers(bool bAlsoClearCPUMemory)
+
+void UNiagaraGSDataInterface::FlushGPUBuffersVM(FVectorVMExternalFunctionContext& Context)
 {
-    FNDIGaussianSplatProxy* ProxyPtr = GetProxyAs<FNDIGaussianSplatProxy>();
-    if (ProxyPtr)
+
+    FNDIInputParam<FNiagaraBool> InFlush(Context);
+    // 1. Declare the output parameter reader
+    FNDIOutputParam<int32> OutSuccess(Context);
+
+
+    bool bShouldFlush = false;
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
     {
-        // Enqueue the release on the Render Thread safely
-        ENQUEUE_RENDER_COMMAND(NiagaraGS_FlushBuffers)(
-            [ProxyPtr](FRHICommandListImmediate& RHICmdList)
-            {
-                ProxyPtr->ReleaseBuffers();
-                ProxyPtr->bManuallyFlushed = true; // Mark as flushed to prevent auto re-upload
-                ProxyPtr->InitFallbackBuffer();    // Bind fallback zero-buffer to prevent HLSL crashes
-            });
+        // Check if the boolean is true
+        if (InFlush.GetAndAdvance())
+        {
+            bShouldFlush = true;
+        }
     }
 
-    // Optionally clear the heavy CPU array too 
-    if (bAlsoClearCPUMemory && SplatAsset)
+    if (bShouldFlush)
     {
-        SplatAsset->SplatData.Empty();
-        SplatAsset->SplatCount = 0;
-        UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Flushed GPU buffers AND cleared CPU memory."));
+        FNDIGaussianSplatProxy* ProxyPtr = GetProxyAs<FNDIGaussianSplatProxy>();
+        if (ProxyPtr && !ProxyPtr->bManuallyFlushed)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Flushed"));
+            ProxyPtr->bManuallyFlushed = true; // Mark immediately to prevent race conditions
+
+            ENQUEUE_RENDER_COMMAND(NiagaraGS_FlushBuffers)(
+                [ProxyPtr](FRHICommandListImmediate& RHICmdList)
+                {
+                    ProxyPtr->ReleaseBuffers();
+                    ProxyPtr->InitFallbackBuffer(); // Prevent HLSL crash
+
+                });
+        }
+
     }
-    else
+
+    // 2. Execute the flush logic exactly ONCE per VM call 
+    // (Keep this OUTSIDE the loop so it doesn't spam if accidentally used in Particle Update!)
+ 
+    // 3. Satisfy the VM context by advancing the outputs
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
     {
-        UE_LOG(LogTemp, Log, TEXT("NiagaraGS: Flushed GPU buffers for memory optimization."));
+        OutSuccess.SetAndAdvance(1); // Write a dummy '1' to the output pin
     }
 }
+
+/*void UNiagaraGSDataInterface::FlushGPUBuffersVM(FVectorVMExternalFunctionContext& Context)
+{
+    UE_LOG(LogTemp, Warning, TEXT("Trying to Flushed 1"));
+    // Read the boolean input from Niagara
+    FNDIInputParam<FNiagaraBool> InFlush(Context);
+
+    bool bShouldFlush = false;
+    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
+    {
+        // Check if the boolean is true
+        if (InFlush.GetAndAdvance())
+        {
+            bShouldFlush = true;
+        }
+    }
+
+    if (bShouldFlush)
+    {
+        FNDIGaussianSplatProxy* ProxyPtr = GetProxyAs<FNDIGaussianSplatProxy>();
+        if (ProxyPtr && !ProxyPtr->bManuallyFlushed)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Flushed"));
+            ProxyPtr->bManuallyFlushed = true; // Mark immediately to prevent race conditions
+
+            ENQUEUE_RENDER_COMMAND(NiagaraGS_FlushBuffers)(
+                [ProxyPtr](FRHICommandListImmediate& RHICmdList)
+                {
+                    ProxyPtr->ReleaseBuffers();
+                    ProxyPtr->InitFallbackBuffer(); // Prevent HLSL crash
+                   
+                });
+        }
+
+    }
+}*/
