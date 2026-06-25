@@ -458,7 +458,7 @@ void UNiagaraGSDataInterface::UploadToGPU()
 void UNiagaraGSDataInterface::PostLoad()
 {
     Super::PostLoad();
-    UploadToGPU();
+    //UploadToGPU();
 }
 
 #if WITH_EDITOR
@@ -1001,17 +1001,17 @@ void FNDIGaussianSplatProxy::UploadData(const TArray<FGaussianSplatData>& Splats
 
 void UNiagaraGSDataInterface::FlushGPUBuffersVM(FVectorVMExternalFunctionContext& Context)
 {
-
+    // Read input first
     FNDIInputParam<FNiagaraBool> InFlush(Context);
-    // 1. Declare the output parameter reader
-    FNDIOutputParam<int32> OutSuccess(Context);
 
+    // Read output second (MATCHES THE SIGNATURE: FNiagaraBool)
+    FNDIOutputParam<FNiagaraBool> OutSuccess(Context);
 
     bool bShouldFlush = false;
     for (int32 i = 0; i < Context.GetNumInstances(); ++i)
     {
-        // Check if the boolean is true
-        if (InFlush.GetAndAdvance())
+        FNiagaraBool bFlushVal = InFlush.GetAndAdvance();
+        if (bFlushVal == FNiagaraBool::True)
         {
             bShouldFlush = true;
         }
@@ -1022,7 +1022,7 @@ void UNiagaraGSDataInterface::FlushGPUBuffersVM(FVectorVMExternalFunctionContext
         FNDIGaussianSplatProxy* ProxyPtr = GetProxyAs<FNDIGaussianSplatProxy>();
         if (ProxyPtr && !ProxyPtr->bManuallyFlushed)
         {
-            UE_LOG(LogTemp, Warning, TEXT("Flushed"));
+            UE_LOG(LogTemp, Warning, TEXT("Flushed via VM"));
             ProxyPtr->bManuallyFlushed = true; // Mark immediately to prevent race conditions
 
             ENQUEUE_RENDER_COMMAND(NiagaraGS_FlushBuffers)(
@@ -1030,54 +1030,52 @@ void UNiagaraGSDataInterface::FlushGPUBuffersVM(FVectorVMExternalFunctionContext
                 {
                     ProxyPtr->ReleaseBuffers();
                     ProxyPtr->InitFallbackBuffer(); // Prevent HLSL crash
-
                 });
         }
-
     }
 
-    // 2. Execute the flush logic exactly ONCE per VM call 
-    // (Keep this OUTSIDE the loop so it doesn't spam if accidentally used in Particle Update!)
- 
-    // 3. Satisfy the VM context by advancing the outputs
+    // Satisfy the VM context by advancing the outputs
     for (int32 i = 0; i < Context.GetNumInstances(); ++i)
     {
-        OutSuccess.SetAndAdvance(1); // Write a dummy '1' to the output pin
+        OutSuccess.SetAndAdvance(FNiagaraBool(true));
     }
 }
 
-/*void UNiagaraGSDataInterface::FlushGPUBuffersVM(FVectorVMExternalFunctionContext& Context)
+int32 UNiagaraGSDataInterface::PerInstanceDataSize() const
 {
-    UE_LOG(LogTemp, Warning, TEXT("Trying to Flushed 1"));
-    // Read the boolean input from Niagara
-    FNDIInputParam<FNiagaraBool> InFlush(Context);
+    // Return 0 because we store our state (ActiveInstances) directly on the DI class, not in the void* pointer.
+    return 0;
+}
 
-    bool bShouldFlush = false;
-    for (int32 i = 0; i < Context.GetNumInstances(); ++i)
+bool UNiagaraGSDataInterface::InitPerInstanceData(void* PerInstanceData, FNiagaraSystemInstance* SystemInstance)
+{
+    // Only upload to the GPU if this is the very first Niagara System using this splat data
+    if (ActiveInstances == 0)
     {
-        // Check if the boolean is true
-        if (InFlush.GetAndAdvance())
-        {
-            bShouldFlush = true;
-        }
+        UploadToGPU();
     }
+    ActiveInstances++;
+    return true;
+}
 
-    if (bShouldFlush)
+void UNiagaraGSDataInterface::DestroyPerInstanceData(void* PerInstanceData, FNiagaraSystemInstance* SystemInstance)
+{
+    ActiveInstances--;
+
+    // If no more systems are alive, automatically release the GPU memory!
+    if (ActiveInstances <= 0)
     {
         FNDIGaussianSplatProxy* ProxyPtr = GetProxyAs<FNDIGaussianSplatProxy>();
-        if (ProxyPtr && !ProxyPtr->bManuallyFlushed)
+        if (ProxyPtr)
         {
-            UE_LOG(LogTemp, Warning, TEXT("Flushed"));
-            ProxyPtr->bManuallyFlushed = true; // Mark immediately to prevent race conditions
-
-            ENQUEUE_RENDER_COMMAND(NiagaraGS_FlushBuffers)(
+            ENQUEUE_RENDER_COMMAND(NiagaraGS_DestroyFlush)(
                 [ProxyPtr](FRHICommandListImmediate& RHICmdList)
                 {
                     ProxyPtr->ReleaseBuffers();
-                    ProxyPtr->InitFallbackBuffer(); // Prevent HLSL crash
-                   
+                    ProxyPtr->InitFallbackBuffer();
                 });
         }
-
+        ActiveInstances = 0;
     }
-}*/
+}
+

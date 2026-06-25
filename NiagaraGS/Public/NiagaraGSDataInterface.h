@@ -23,10 +23,6 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian Splats")
     TObjectPtr<UGaussianSplatAsset> SplatAsset;
 
-    // NEW: Manually flush buffers to save memory after particles have initialized
-    //UFUNCTION(BlueprintCallable, Category = "Gaussian Splats")
-   // void FlushGPUBuffers(bool bAlsoClearCPUMemory = false);
-
     // ── UNiagaraDataInterface interface ───────────────────────────
     virtual void GetFunctions(TArray<FNiagaraFunctionSignature>& OutFunctions) override;
     virtual void GetVMExternalFunction(const FVMExternalFunctionBindingInfo& BindingInfo, void* InstanceData, FVMExternalFunction& OutFunc) override;
@@ -34,8 +30,12 @@ public:
     virtual bool CopyToInternal(UNiagaraDataInterface* Destination) const override;
     virtual bool Equals(const UNiagaraDataInterface* Other) const override;
 
-    int32 GetSplatCount() const;
+    // --- NEW PER-INSTANCE DATA METHODS ---
+    virtual int32 PerInstanceDataSize() const override;
+    virtual bool InitPerInstanceData(void* PerInstanceData, FNiagaraSystemInstance* SystemInstance) override;
+    virtual void DestroyPerInstanceData(void* PerInstanceData, FNiagaraSystemInstance* SystemInstance) override;
 
+    int32 GetSplatCount() const;
     virtual void PostInitProperties() override;
     virtual void PostLoad() override;
 
@@ -76,5 +76,9 @@ private:
     static const FName Name_GetSplatSHCoefficients;
 
     static const FName Name_FlushGPUBuffers;
+
+protected:
+    // Tracks how many systems are currently using this Data Interface
+    int32 ActiveInstances = 0;
 
 }; 
